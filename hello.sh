@@ -8,3 +8,4 @@ clear
 echo "completed"
 echo "testing"
 echo "done"
+echo "were"
