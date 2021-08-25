@@ -7,3 +7,4 @@ sleep 5
 clear
 echo "completed"
 echo "testing"
+echo "done"
