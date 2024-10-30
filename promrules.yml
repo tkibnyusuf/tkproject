@@ -1,0 +1,203 @@
+groups:
+- name: EKS Monitoring Alerts
+  rules:
+  - alert: NodeNotReady
+    expr: kube_node_status_condition{condition="Ready", status="true"} == 0
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      description: "Raise alert when EKS node goes Not Ready state continuously for 2 minutes."
+      summary: "EKS Node Not Ready"
+
+  - alert: NodeHighCPU
+    expr: (100 - (avg by(instance)(rate(node_cpu_seconds_total{mode="idle"}[1m])) * 100)) > 85
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      description: "Alert when node CPU usage is above 85% for 15 minutes."
+      summary: "Node High CPU Usage"
+
+  - alert: NodeOOMKillDetected
+    expr: sum by(node) (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 < 10
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      description: "Kubernetes node's memory availability is below 10%."
+      summary: "Node OOM Kill Detected"
+
+  - alert: NodeContractLimit
+    expr: sum(node_nf_conntrack_entries) by(instance) / sum(node_nf_conntrack_entries_limit) by(instance) > 0.9
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      description: "Node contract limit usage is above 90%."
+      summary: "Node Contract Limit"
+
+  - alert: NodeDiskSpaceLow
+    expr: 100 - (node_filesystem_avail_bytes{fstype!~"tmpfs|fuse.lustre"} / node_filesystem_size_bytes{fstype!~"tmpfs|fuse.lustre"} * 100) < 10
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      description: "Alert if node disk space is less than 10%."
+      summary: "Node Disk Space Low"
+
+  - alert: NodeDown
+    expr: up == 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      description: "Node is down and unresponsive."
+      summary: "Node Down"
+
+  - alert: KubernetesAPIErrors
+    expr: sum(rate(apiserver_request_errors_total[5m])) by (code) > 5
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      description: "The Kubernetes API server is reporting high error rates."
+      summary: "Kubernetes API Errors"
+
+  - alert: KubernetesAPILatency
+    expr: histogram_quantile(0.99, sum(rate(apiserver_request_duration_seconds_bucket[5m])) by (le)) > 1
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      description: "API latency is high. Requests are taking more than 1 second at the 99th percentile."
+      summary: "Kubernetes API Latency"
+
+       
+
+  - alert: DaemonSetMisScheduled
+    expr: kube_daemonset_status_number_misscheduled > 0
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      description: "Monitors when a daemonset pod fails to be scheduled to a node."
+      summary: "DaemonSet Mis-scheduled"
+
+  - alert: ContainerOOMKilled
+    expr: container_memory_failures_total > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      description: "Alert when a container encounters an out-of-memory (OOM) kill."
+      summary: "Container OOM Killed"
+
+  - alert: PodJobFailed
+    expr: kube_pod_status_phase{phase="Failed"} > 0
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      description: "Alert when a pod job is in a failed status."
+      summary: "Pod Job Failed"
+
+  - alert: InsufficientPodReplicas
+    expr: kube_deployment_spec_replicas - kube_deployment_status_replicas_available > 0
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      description: "When the number of pod replicas doesn't match the desired count in the deployment."
+      summary: "Insufficient Pod Replicas"
+
+  - alert: PodCrashLooping
+    expr: rate(kube_pod_container_status_restarts_total[5m]) > 0.5
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      description: "Pod is crashing repeatedly with a high restart frequency."
+      summary: "Pod Crash Looping"
+
+  - alert: PodHighCPU
+    expr: rate(container_cpu_usage_seconds_total[5m]) > 0.85
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      description: "When pod CPU usage is above 85% of the allocated limit."
+      summary: "Pod High CPU Usage"
+
+  - alert: PodHighMemory
+    expr: (container_memory_usage_bytes / container_spec_memory_limit_bytes) > 0.85
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      description: "When pod memory usage is above 85% of the allocated limit."
+      summary: "Pod High Memory Usage"
+
+  - alert: CoreDNSDown
+    expr: up{job="coredns"} == 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      description: "Alert when CoreDNS is down."
+      summary: "CoreDNS Down"
+
+  - alert: CoreDNSErrors
+    expr: rate(coredns_dns_request_type_count_total{rcode!="NOERROR"}[5m]) > 5
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      description: "CoreDNS is experiencing a high rate of errors."
+      summary: "CoreDNS Errors"
+
+  - alert: CoreDNSLatency
+    expr: histogram_quantile(0.95, sum(rate(coredns_dns_request_duration_seconds_bucket[5m])) by (le)) > 1
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      description: "The latency of DNS queries handled by CoreDNS is above the threshold."
+      summary: "CoreDNS Latency High"
+
+  - alert: CoreDNSForwardingLatency
+    expr: rate(coredns_forward_request_duration_seconds_sum[5m])
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      description: "Alert when the average latency of DNS forwarding requests exceeds a threshold."
+      summary: "CoreDNS Forwarding Latency High"
+
+  - alert: CoreDNSForwardingError
+    expr: rate(coredns_forward_request_failures_total[5m]) > 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      description: "Alert when there are errors in DNS forwarding requests, possibly due to issues with the upstream DNS server."
+      summary: "CoreDNS Forwarding Error"
+
+      
+  - alert: CustomClientCertExpiring
+    expr: kubelet_certificate_manager_client_ttl_seconds < 2592000
+    for: 1h
+    labels:
+      severity: warning
+    annotations:
+      description: "Custom managed client certificate used to authenticate with API server is set to expire within 30 days."
+      summary: "Custom Client Certificate Expiring Soon"
+  
+  - alert: StatefulSetDown
+    expr: kube_statefulset_status_replicas != kube_statefulset_replicas
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      description: "StatefulSet replicas do not match the desired count, indicating that some StatefulSet pods may not be running as expected."
+      summary: "StatefulSet Down"
