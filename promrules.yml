@@ -201,3 +201,14 @@ groups:
     annotations:
       description: "StatefulSet replicas do not match the desired count, indicating that some StatefulSet pods may not be running as expected."
       summary: "StatefulSet Down"
+
+  - alert: PodNotReady
+    expr: kube_pod_status_ready{condition="false"} == 1
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      description: "Raise alert when a pod remains in Not Ready state for more than 2 minutes."
+      summary: "Pod Not Ready"
+
+      
