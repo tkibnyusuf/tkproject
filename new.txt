@@ -1,12 +1,563 @@
-      serviceDependencies:
-        - identifier: DIND
-          name: DIND
-          type: Service
-          spec:
-            connectorRef: account.JfrogCloudArtifactoryDocker
-            image: artifactorycloud.ual.com/v-docker/docker/docker:dind
-            privileged: true
-            resources:
-              limits:
-                memory: 3Gi
-                cpu: 3000m
+template:
+  name: st-dotnet-build
+  identifier: stdotnetbuild
+  type: Step
+  tags:
+    AcePlatformEngineering: ""
+  spec:
+    type: Run
+    spec:
+      connectorRef: account.JfrogCloudArtifactoryDocker
+      image: <+input>
+      shell: Bash
+      command: |-
+        chmod +x $(pwd)/Harness_CI/scripts/shared.sh
+        source $(pwd)/Harness_CI/scripts/shared.sh
+        if [ "${DebugMode}" == "true" ]; then
+            uaLog "Enabled debug mode to further troubleshoot the maven build failure" "debug"
+            set -ex
+        else
+            uaLog "Debug Mode is disabled" "warn"
+            uaLog "Enable debug mode to further troubleshoot the maven build failure by setting this variable[DebugMode] to true in your harness pipeline" "debug"
+            set +x
+            set -e
+        fi
+        DotnetVersion=$(dotnet --version)
+        [ -z "${DotnetProjectFolder}" ] && uaLog "Please set DotnetProjectFolder value to dotnet application folder path" "error" && exit 1;
+        [ -z "${DotnetProjectFile}" ] && uaLog "Please set DotnetProjectFile value to dotnet application project [*.csproj] file name" "error" && exit 1;
+        [ -z "${DotnetSolutionFile}" ] && uaLog "Please set DotnetSolutionFile value to dotnet application solution [*.sln] file name" "error" && exit 1;
+        #[ -z "${DotnetTestProjectPath}" ] && uaLog "Please set DotnetTestProjectPath value to dotnet unit test cases folder path" "error" && exit 1;
+        [ -z "${NugetRegistryUrl}" ] && uaLog "Please set NugetRegistryUrl for restoring dependencies from nuget package registry" "error" && exit 1;
+        [ -z "${NugetRegistryUser}" ] && uaLog "Please set NugetRegistryUser to authenticate into cloud artifactory nuget package registry" "error" && exit 1;
+        [ -z "${NugetRegistryPassword}" ] && uaLog "Please set NugetRegistryPassword to authenticate into cloud artifactory nuget package registry" "error" && exit 1;
+        [ -z "${DotnetSkipTest}" ] && uaLog "Please set DotnetSkipTest to enable or disable running Dotnet unit test cases" "error" && exit 1;
+        [ -z "${DotnetSkipPublish}" ] && uaLog "Please set DotnetSkipPublish to enable or disable running dotnet publish packages" "error" && exit 1;
+        export CodeBaseTag=$(echo "$CodeBaseTag" | tr '[:upper:]' '[:lower:]')
+        uaLog "-----------------------------------------------------------------------------------------"
+        uaLog "Dotnet Build Intiated with below arguments" "debug"
+        uaLog "ServiceName                    :              [$ServiceName]" "info"
+        uaLog "CodeBaseTag                    :              [$CodeBaseTag]" "info"
+        uaLog "DotnetVersion                  :              [$DotnetVersion]" "info"
+        uaLog "DotnetProjectFolder            :              [${DotnetProjectFolder}]" "info"
+        uaLog "DotnetProjectFile              :              [${DotnetProjectFile}]" "info"
+        uaLog "DotnetSolutionFile             :              [${DotnetSolutionFile}]" "info"
+        uaLog "DotnetTestProjectPath          :              [${DotnetTestProjectPath}]" "info"
+        uaLog "NugetRegistryUrl               :              [${NugetRegistryUrl}]" "info"
+        uaLog "DotnetSkipTest                 :              [${DotnetSkipTest}]" "info"
+        uaLog "DotnetSkipPublish              :              [${DotnetSkipPublish}]" "info"
+        uaLog "-----------------------------------------------------------------------------------------"
+        DotnetBuildStatus=0
+        {
+            uaLog "Configuring Nuget source to use Cloud artifactory registry by default" "debug"
+            uaLog "-----------------------------------------------------------------------------------------"
+            uaLog "COMMAND: dotnet nuget add source ${NugetRegistryUrl} -n artifactory -u ${NugetRegistryUser} -p ${NugetRegistryPassword} --store-password-in-clear-text" "debug"
+            uaLog "-----------------------------------------------------------------------------------------"
+            dotnet nuget add source ${NugetRegistryUrl} -n artifactory -u ${NugetRegistryUser} -p ${NugetRegistryPassword} --store-password-in-clear-text
+            uaLog "Dotnet Restore from Cloud artifactory registry" "debug"
+            uaLog "-----------------------------------------------------------------------------------------"
+            uaLog "COMMAND: dotnet restore -s ${NugetRegistryUrl} ${DotnetSolutionFile}" "debug"
+            uaLog "-----------------------------------------------------------------------------------------"
+            [ ! -e ${DotnetSolutionFile} ] && uaLog "The dotnet solution file [${DotnetSolutionFile}] does not exist. Provide the exact path of the dotnet solution file which needs to be executed. Ex:[United.EDJ.PartnerManagement.Query-Service.sln or *.sln]. Please go through the dotnet documentation: https://platform.ual.com/documentation/.harness/templates/stage/ci/stgt-ci-dotnet/" "error" && exit 1;
+            dotnet restore -s ${NugetRegistryUrl} ${DotnetSolutionFile}
+            uaLog "Searching for AWS Project Type [Lambda] in .csproj files" "debug"
+            while IFS= read -r csproj_file; do
+              if grep -q "<AWSProjectType>Lambda</AWSProjectType>" "$csproj_file"; then
+                  uaLog "AWS Lambda project found in: $csproj_file" "warn"
+                  export AWSProjectType=Lambda
+                  export AWSLambdaProjectFilePath=$csproj_file
+                  uaLog "AWS Lambda project found in: [$AWSLambdaProjectFilePath]" "warn"
+                  uaLog "Searching for Platform Target and Platform Type in .csproj files" "debug"
+                  uaLog "Checking file: $csproj_file" "info"
+                  platform_target=$(grep -oP '(?<=<PlatformTarget>).*?(?=</PlatformTarget>)' "$csproj_file" || echo "")
+                  platforms=$(grep -oP '(?<=<Platforms>).*?(?=</Platforms>)' "$csproj_file" || echo "")
+                  found_runtime=false
+                  if [ -n "$platform_target" ]; then
+                      uaLog "Found PlatformTarget: [$platform_target] in $csproj_file" "info"
+                      found_runtime=true
+                      case "$platform_target" in
+                          x64)
+                              export DotnetRuntimeIdentifier="linux-x64"
+                              uaLog "Exported DotnetRuntimeIdentifier=linux-x64" "warn"
+                              ;;
+                          x86)
+                              export DotnetRuntimeIdentifier="linux-x86"
+                              uaLog "Exported DotnetRuntimeIdentifier=linux-x86" "warn"
+                              ;;
+                          *)
+                              uaLog "Unknown PlatformTarget: [$platform_target] in $csproj_file" "warn"
+                              ;;
+                      esac
+                  fi
+                  if [ -n "$platforms" ]; then
+                      uaLog "Found Platforms: [$platforms] in $csproj_file" "info"
+                      found_runtime=true
+                      if [[ "$platforms" == *"x64"* ]]; then
+                          export DotnetRuntimeIdentifier="linux-x64"
+                          uaLog "Exported DotnetRuntimeIdentifier=linux-x64 based on Platforms" "warn"
+                      elif [[ "$platforms" == *"x86"* ]]; then
+                          export DotnetRuntimeIdentifier="linux-x86"
+                          uaLog "Exported DotnetRuntimeIdentifier=linux-x86 based on Platforms" "warn"
+                      elif [[ "$platforms" == *"AnyCPU"* ]]; then
+                          export DotnetRuntimeIdentifier="linux-x64"
+                          uaLog "Exported DotnetRuntimeIdentifier=linux-x64 (default) since Platforms=AnyCPU" "warn"
+                      else
+                          uaLog "Unknown Platforms value: [$platforms] in $csproj_file" "warn"
+                      fi
+                  fi
+                  if [ "$found_runtime" = false ]; then
+                      uaLog "No <PlatformTarget> or <Platforms> found in $csproj_file" "warn"
+                      uaLog "Please set the Platform target in your .csproj file [<PlatformTarget>x86</PlatformTarget>] or [<PlatformTarget>x64</PlatformTarget>] based on your application compatibility" "critical"
+                      uaLog "Assuming default Runtime Identifier: linux-x64" "info"
+                      export DotnetRuntimeIdentifier="linux-x64"
+                  fi
+              fi
+            done < <(find . -name "*.csproj")
+            if [ "$AWSProjectType" = "Lambda" ]; then
+              uaLog "AWS Project Type Detected as [Lambda]." "critical"
+              uaLog "Installing AWS Lambda tools [Amazon.Lambda.Template & Amazon.Lambda.Tools]." "warn"
+              dotnet new -i Amazon.Lambda.Templates
+              dotnet tool install -g Amazon.Lambda.Tools
+              dotnet tool update -g Amazon.Lambda.Tools
+              export PATH="$PATH:/root/.dotnet/tools"
+            else
+              uaLog "No AWS Lambda Project Type found. Skipping AWS Lambda tools installation." "warn"
+              export AWSProjectType=NotLambda
+            fi
+            uaLog "Dotnet Build Solution File" "debug"
+            uaLog "-----------------------------------------------------------------------------------------"
+            uaLog "COMMAND: dotnet build ${DotnetSolutionFile}" "debug"
+            uaLog "-----------------------------------------------------------------------------------------"
+            dotnet_build_output=$(dotnet build ${DotnetSolutionFile} 2>&1)
+            exit_code=$?
+            if [[ $exit_code -ne 0 ]] || echo "$dotnet_build_output" | grep -q "Build FAILED." || echo "$dotnet_build_output" | grep -Eqi "error CS[0-9]+:" || echo "$dotnet_build_output" | grep -Eqi "[1-9][0-9]* Error\(s\)"; then
+                echo "$dotnet_build_output"
+                uaLog "Dotnet Build Execution Failed !!!" "error"
+                DotnetBuildStatus=1
+                exit 1
+            else
+                echo "$dotnet_build_output"
+                DotnetBuildStatus=0
+                uaLog "Dotnet Build Execution Success" "success"
+            fi
+            if [ "${DotnetTestProjectPath}" != "" ] && [ "${DotnetSkipTest}" = 'false' ]; then
+                uaLog "DotnetSkipTest value is set to [${DotnetSkipTest}]" "debug"
+                if [ -d "${DotnetTestProjectPath}" ]; then
+                  uaLog "Dotnet Test Folder Path [${DotnetTestProjectPath}] exists" "debug"
+                  csproj_count=$(find "${DotnetTestProjectPath}" -maxdepth 1 -type f -name "*.csproj" | wc -l)
+                  if [ "$csproj_count" -gt 1 ]; then
+                      uaLog "There are multiple .csproj files in the dotnet test folder" "warn"
+                      ls -lart ${DotnetTestProjectPath}/
+                      csproj_file=$(find "${DotnetTestProjectPath}" -maxdepth 1 -type f -name "*.csproj" -exec grep -l "*test*|*Test*" {} +)
+                      if [ -n "$csproj_file" ]; then
+                          uaLog "Using '$csproj_file' for dotnet test command" "debug"
+                          uaLog "Adding Dotnet Unit Test cases folder path" "debug"
+                          uaLog "-----------------------------------------------------------------------------------------" 
+                          uaLog "COMMAND: dotnet add ${DotnetTestProjectPath}/${csproj_file} package coverlet.msbuild --version 6.0.0" "debug"
+                          uaLog "-----------------------------------------------------------------------------------------"
+                          dotnet add ${DotnetTestProjectPath}/${csproj_file} package coverlet.msbuild --version 6.0.0
+                          uaLog "Running Dotnet Test cases with sourced Dotnet Unit Test cases folder" "debug"
+                          uaLog "-----------------------------------------------------------------------------------------" 
+                          uaLog "COMMAND: dotnet test ${DotnetTestProjectPath}/${csproj_file} --no-build /p:CollectCoverage=true /p:CoverletOutputFormat=opencover /p:CoverletOutput=/harness/cover" "debug"
+                          uaLog "-----------------------------------------------------------------------------------------"
+                          dotnet_test_output=$(dotnet test ${DotnetTestProjectPath}/${csproj_file} --no-build /p:CollectCoverage=true /p:CoverletOutputFormat=opencover /p:CoverletOutput="/harness/cover" 2>&1)
+                          exit_code=$?
+                          if [[ $exit_code -ne 0 ]] || echo "$dotnet_test_output" | grep -qi "Failed!"; then
+                              echo "$dotnet_test_output"
+                              uaLog "Dotnet Test Execution Failed !!!" "error"
+                              DotnetBuildStatus=1
+                              exit 1
+                          else
+                              echo "$dotnet_build_output"
+                              DotnetBuildStatus=0
+                              uaLog "Dotnet Test Execution Success" "success"
+                          fi
+                          ls -lart /harness
+                          break  # Break the loop after the first occurrence of 'test' keyword
+                      else
+                          uaLog "No .csproj file with 'test' keyword found in the dotnet test folder" "error"
+                          uaLog "To fix the issue, provide the DotnetTestProjectPath input variable with full dotnet test file path" "critical"
+                          uaLog "If the dotnet test cases are not executed, the test code coverage will not be available on sonar project dashbaord" "warn"
+                          uaLog "Please go through the dotnet documentation: https://platform.ual.com/documentation/.harness/templates/stage/ci/stgt-ci-dotnet/" "info"
+                          ls -lart ${DotnetTestProjectPath}/
+                          exit 1
+                      fi
+                  elif [ "$csproj_count" -eq 1 ]; then
+                      uaLog "There is only one .csproj file in the dotnet test folder" "debug"
+                      ls -lart ${DotnetTestProjectPath}/
+                      uaLog "Adding Dotnet Unit Test cases folder path" "debug"
+                      uaLog "-----------------------------------------------------------------------------------------" 
+                      uaLog "COMMAND: dotnet add ${DotnetTestProjectPath} package coverlet.msbuild --version 6.0.0" "debug"
+                      uaLog "-----------------------------------------------------------------------------------------"
+                      dotnet add ${DotnetTestProjectPath} package coverlet.msbuild --version 6.0.0
+                      uaLog "Running Dotnet Test cases with sourced Dotnet Unit Test cases folder" "debug"
+                      uaLog "-----------------------------------------------------------------------------------------" 
+                      uaLog "COMMAND: dotnet test ${DotnetTestProjectPath} --no-build /p:CollectCoverage=true /p:CoverletOutputFormat=opencover /p:CoverletOutput=/harness/cover" "debug"
+                      uaLog "-----------------------------------------------------------------------------------------"
+                      dotnet_test_output=$(dotnet test ${DotnetTestProjectPath} --no-build /p:CollectCoverage=true /p:CoverletOutputFormat=opencover /p:CoverletOutput="/harness/cover" 2>&1)
+                      exit_code=$?
+                      if [[ $exit_code -ne 0 ]] || echo "$dotnet_test_output" | grep -qi "Failed!"; then
+                          echo "$dotnet_test_output"
+                          uaLog "Dotnet Test Execution Failed !!!" "error"
+                          DotnetBuildStatus=1
+                          exit 1
+                      else
+                          echo "$dotnet_build_output"
+                          DotnetBuildStatus=0
+                          uaLog "Dotnet Test Execution Success" "success"
+                      fi
+                      ls -lart /harness
+                  else
+                      uaLog "There are no .csproj files in the dotnet test folder, code coverage will not be generated" "error"
+                      uaLog "If the dotnet test cases are not executed, the test code coverage will not be available on sonar project dashbaord" "warn"
+                      uaLog "Please go through the dotnet documentation: https://platform.ual.com/documentation/.harness/templates/stage/ci/stgt-ci-dotnet/" "info"
+                      ls -lart ${DotnetTestProjectPath}/
+                      exit 1
+                  fi
+                elif [[ -f "${DotnetTestProjectPath}" ]]; then
+                     uaLog "Dotnet test file path[${DotnetTestProjectPath}] exists" "info"
+                     uaLog "Adding Dotnet Unit Test cases folder path" "debug"
+                     uaLog "-----------------------------------------------------------------------------------------" 
+                     uaLog "COMMAND: dotnet add ${DotnetTestProjectPath} package coverlet.msbuild --version 6.0.0" "debug"
+                     uaLog "-----------------------------------------------------------------------------------------"
+                     dotnet add ${DotnetTestProjectPath} package coverlet.msbuild --version 6.0.0
+                     uaLog "Running Dotnet Test cases with sourced Dotnet Unit Test cases folder" "debug"
+                     uaLog "-----------------------------------------------------------------------------------------" 
+                     uaLog "COMMAND: dotnet test ${DotnetTestProjectPath} --no-build /p:CollectCoverage=true /p:CoverletOutputFormat=opencover /p:CoverletOutput=/harness/cover" "debug"
+                     uaLog "-----------------------------------------------------------------------------------------"
+                     dotnet test ${DotnetTestProjectPath} --no-build /p:CollectCoverage=true /p:CoverletOutputFormat=opencover /p:CoverletOutput="/harness/cover"
+                     ls -lart /harness
+                else
+                  uaLog "The dotnet test folder or file [${DotnetTestProjectPath}] does not exist in the github repository, please provide valid test project path or file" "error"
+                  uaLog "Please go through the dotnet documentation: https://platform.ual.com/documentation/.harness/templates/stage/ci/stgt-ci-dotnet/" "info"
+                  uaLog "If the dotnet test cases are not executed, the test code coverage will not be available on sonar project dashbaord" "warn"
+                  exit 1
+                fi
+            else
+                uaLog "DotnetSkipTest value is set to [${DotnetSkipTest}]" "debug"
+                uaLog "Skipping Dotnet Unit Test Cases Execution" "warn"
+            fi
+            uaLog "Remove Nuget Cloud Artifactory Authentication Credentials" "debug"
+            uaLog "-----------------------------------------------------------------------------------------"
+            uaLog "COMMAND: dotnet nuget remove source artifactory" "debug"
+            uaLog "-----------------------------------------------------------------------------------------"
+            dotnet nuget remove source artifactory
+            if [ "${DotnetSkipPublish}" = 'false' ]; then
+                [ ! -d ${DotnetProjectFolder} ] && uaLog "The dotnet project folder [${DotnetProjectFolder}] does not exist. Provide the valid project path value where the .csproj exists" "error" && exit 1;
+                [ ! -e ${DotnetProjectFolder}/${DotnetProjectFile} ] && uaLog "The dotnet project config file [${DotnetProjectFolder}/${DotnetProjectFile}] does not exist. Provide the exact file name against which the dotnet build needs to be executed" "error" && exit 1;
+                if [ "$AWSProjectType" = 'Lambda' ]; then
+                    uaLog "AWS Project Type Detected as [Lambda]." "critical"
+                    uaLog "Dotnet Publish Profile File" "debug"
+                    uaLog "-----------------------------------------------------------------------------------------"
+                    uaLog "COMMAND: dotnet publish ${DotnetProjectFolder}/${DotnetProjectFile} -c Debug --runtime ${DotnetRuntimeIdentifier}" "debug"
+                    uaLog "-----------------------------------------------------------------------------------------"
+                    dotnet publish ${DotnetProjectFolder}/${DotnetProjectFile} -c Debug --runtime ${DotnetRuntimeIdentifier}
+                else
+                    uaLog "Dotnet Publish Profile File" "debug"
+                    uaLog "-----------------------------------------------------------------------------------------"
+                    uaLog "COMMAND: dotnet publish ${DotnetProjectFolder}/${DotnetProjectFile} -c Debug" "debug"
+                    uaLog "-----------------------------------------------------------------------------------------"
+                    dotnet publish ${DotnetProjectFolder}/${DotnetProjectFile} -c Debug
+                fi
+                if [ "$AWSProjectType" = 'Lambda' ]; then
+                    uaLog "AWS Project Type Detected as [Lambda]." "critical"
+                    uaLog "Dotnet Publish Project File in Release mode" "warn"
+                    uaLog "-----------------------------------------------------------------------------------------"
+                    uaLog "COMMAND: dotnet publish ${DotnetProjectFolder}/${DotnetProjectFile} -c Release --runtime ${DotnetRuntimeIdentifier}" "debug"
+                    uaLog "-----------------------------------------------------------------------------------------"
+                    dotnet publish ${DotnetProjectFolder}/${DotnetProjectFile} -c Release --runtime ${DotnetRuntimeIdentifier}
+                    uaLog "Creating [/harness/artifactoryrelease] Folder to save release zip artifact for Lambda deployments" "debug"
+                    mkdir /harness/artifactoryrelease
+                    FilePath="/harness/$DotnetProjectFolder/bin/Release/"
+                    if [ -d "$FilePath" ]; then
+                      uaLog "The File Path [$FilePath] exist" "success"
+                    else
+                      uaLog "The File Path [$FilePath] doesn't exist" "error"
+                      exit 1
+                    fi
+                    DeepestPublishFolder=$(find "$FilePath" -type d -name "publish" | sort -r | while read -r pubDir; do
+                      if find "$pubDir" -type f -name "*.dll" | grep -q .; then
+                          echo "$pubDir"
+                          break
+                      fi
+                    done)
+                    if [ -n "$DeepestPublishFolder" ]; then
+                      uaLog "Using publish folder: [$DeepestPublishFolder]" "success"
+                      ls -R "$DeepestPublishFolder/"
+                      export ArtifactsParentFolderPath="$DeepestPublishFolder"
+                    elif DllParentFolder=$(find "$FilePath" -type f -name "*.dll" -printf "%h\n" | sort -u | head -n 1) && [ -n "$DllParentFolder" ]; then
+                      uaLog "No valid publish folder found, using DLL parent folder: [$DllParentFolder]" "success"
+                      ls -R "$DllParentFolder/"
+                      export ArtifactsParentFolderPath="$DllParentFolder"
+                    else
+                      uaLog "No DLL files found in [$FilePath] or its subdirectories." "error"
+                      uaLog "Dotnet build failed. Please check your build process." "error"
+                      exit 1
+                    fi
+                    uaLog "Copying deployable release dlls to folder [/harness/artifactoryrelease]" "debug"
+                    uaLog "-----------------------------------------------------------------------------------------"
+                    uaLog "COMMAND: cp -f -r ${ArtifactsParentFolderPath}/* /harness/artifactoryrelease/" "debug"
+                    uaLog "-----------------------------------------------------------------------------------------"
+                    cp -f -r ${ArtifactsParentFolderPath}/* /harness/artifactoryrelease/
+                    uaLog "Listing deployable debug dll files in folder [/harness/artifactoryrelease]" "debug"
+                    ls -R /harness/artifactoryrelease/
+                fi
+            else
+                uaLog "DotnetSkipPublish value is set to [${DotnetSkipPublish}]" "debug"
+                uaLog "Skipping Dotnet Publish Execution" "warn" 
+            fi
+            if [ <+stage.variables.NugetPush> != 'false' ]; then
+               uaLog "Add <IsPackable>true</IsPackable> to the project file to enable producing a package from this project." "critical"
+               uaLog "Starting Dotnet Nuget Packing and copying nupkg files to root directory" "info"
+               [ ! -d ${DotnetProjectFolder} ] && uaLog "The dotnet project folder [${DotnetProjectFolder}] does not exist. Provide the valid project path value where the .csproj exists. Please go through the dotnet documentation: https://platform.ual.com/documentation/.harness/templates/stage/ci/stgt-ci-dotnet/" "error" && exit 1;
+               [ ! -e ${DotnetProjectFolder}/${DotnetProjectFile} ] && uaLog "The dotnet project config file [${DotnetProjectFolder}/${DotnetProjectFile}] does not exist. Provide the exact file name against which the dotnet build needs to be executed. Please go through the dotnet documentation: https://platform.ual.com/documentation/.harness/templates/stage/ci/stgt-ci-dotnet/" "error" && exit 1;
+               if [[ $CodeBaseTag =~ ^v ]]; then
+                   uaLog "Invalid Git Tag Found for .NET Pack, Removing [v]" "warn"
+                   version="${CodeBaseTag#v}"
+                   uaLog "Git Tag: [$version]" "debug"
+               else
+                   uaLog "Valid Git Tag Found for .NET Pack" "warn"
+                   version="$CodeBaseTag"
+                   uaLog "Git Tag: [$version]" "debug"
+               fi
+               if [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+                   uaLog "Valid version format for .NET pack" "warn"
+                   export updated_version=$version
+                   uaLog "Updated Version: [$updated_version]" "debug"
+               else
+                   uaLog "Invalid version[$version] format for .NET pack" "error"
+                   uaLog "Here is the doc to understanding .NET pack supported version format - https://learn.microsoft.com/en-us/nuget/concepts/package-versioning?tabs=semver20sort" "warn"
+                   export updated_version=$version
+               fi
+               uaLog "-----------------------------------------------------------------------------------------"
+               uaLog "COMMAND: dotnet pack ${DotnetProjectFolder}/${DotnetProjectFile} -c Release /p:Version=${updated_version}" "debug"
+               uaLog "-----------------------------------------------------------------------------------------"
+               dotnet pack ${DotnetProjectFolder}/${DotnetProjectFile} -c Release /p:Version=${updated_version}
+               sourceDirectory=/harness/${DotnetProjectFolder}/bin
+               targetDirectory=/harness
+               if [ -d "$sourceDirectory" ]; then
+                  uaLog "The File Path [$sourceDirectory] exist" "success"
+               else
+                  uaLog "The File Path [$sourceDirectory] doesn't exist" "error"
+                  exit 1
+               fi
+               find "${sourceDirectory}" -type f -name "*.nupkg" -exec cp {} "${targetDirectory}" \;
+               uaLog "Copying Dotnet Build Artifact [${DotnetProjectFolder}.dll] to root directory [$targetDirectory]" "info"
+               find "${sourceDirectory}" -type f -name "${DotnetProjectFolder}.dll" -exec cp {} "${targetDirectory}" \;
+               ls -lart /harness
+            fi
+        } || { DotnetBuildStatus=$?; }
+        [ "$DotnetBuildStatus" -ne 0 ] && DOTNET_BUILD_STATUS="FAILED" || DOTNET_BUILD_STATUS="SUCCESS"
+        uaLog "Dotnet Build Execution is complete. DOTNET_BUILD_STATUS => [$DOTNET_BUILD_STATUS]" "critical"
+        if [ $DotnetBuildStatus -ne 0 ]; then
+            uaLog "Dotnet Build Execution Failed!!!!" "error"
+            exit $DotnetBuildStatus
+        else
+            uaLog "Dotnet Build Execution SUCCESS!!!!" "success"
+        fi
+        uaLog "-----------------------------------------------------------------------------------------"
+        uaLog "-----------------------------------------------------------------------------------------"
+        VeracodePackagerStatus=0
+        {
+            if [ "$AWSProjectType" != 'Lambda' ]; then
+                uaLog "Creating [/harness/artifactory] Folder to save zip artifact for veracode scan" "debug"
+                mkdir /harness/artifactory
+                FilePath="/harness/$DotnetProjectFolder/bin/Debug/"
+                if [ -d "$FilePath" ]; then
+                  uaLog "The File Path [$FilePath] exist" "success"
+                else
+                  uaLog "The File Path [$FilePath] doesn't exist" "error"
+                  exit 1
+                fi
+                DeepestPublishFolder=$(find "$FilePath" -type d -name "publish" | sort -r | while read -r pubDir; do
+                  if find "$pubDir" -type f -name "*.dll" | grep -q .; then
+                      echo "$pubDir"
+                      break
+                  fi
+                done)
+                if [ -n "$DeepestPublishFolder" ]; then
+                  uaLog "Using publish folder: [$DeepestPublishFolder]" "success"
+                  ls -R "$DeepestPublishFolder/"
+                  export ArtifactsParentFolderPath="$DeepestPublishFolder"
+                elif DllParentFolder=$(find "$FilePath" -type f -name "*.dll" -printf "%h\n" | sort -u | head -n 1) && [ -n "$DllParentFolder" ]; then
+                  uaLog "No valid publish folder found, using DLL parent folder: [$DllParentFolder]" "success"
+                  ls -R "$DllParentFolder/"
+                  export ArtifactsParentFolderPath="$DllParentFolder"
+                else
+                  uaLog "No DLL files found in [$FilePath] or its subdirectories." "error"
+                  uaLog "Dotnet build failed. Please check your build process." "error"
+                  exit 1
+                fi
+                uaLog "Copying deployable debug dll to folder [/harness/artifactory]" "debug"
+                uaLog "-----------------------------------------------------------------------------------------"
+                uaLog "COMMAND: cp -f -r ${ArtifactsParentFolderPath}/* /harness/artifactory/" "debug"
+                uaLog "-----------------------------------------------------------------------------------------"
+                cp -f -r ${ArtifactsParentFolderPath}/* /harness/artifactory/
+                uaLog "Listing deployable debug dll files in folder [/harness/artifactory]" "debug"
+                ls -R /harness/artifactory/
+                uaLog "Executing command to zip the deployable dll files to upload to veracode for scan" "debug"
+            else
+                uaLog "AWS Project Type Detected as [Lambda]." "critical"
+                uaLog "Creating [/harness/artifactory] Folder to save zip artifact for veracode scan" "debug"
+                mkdir /harness/artifactory
+                FilePath="/harness/$DotnetProjectFolder/bin/Debug/"
+                if [ -d "$FilePath" ]; then
+                  uaLog "The File Path [$FilePath] exist" "success"
+                else
+                  uaLog "The File Path [$FilePath] doesn't exist" "error"
+                  exit 1
+                fi
+                DeepestPublishFolder=$(find "$FilePath" -type d -name "publish" | sort -r | while read -r pubDir; do
+                  if find "$pubDir" -type f -name "*.dll" | grep -q .; then
+                      echo "$pubDir"
+                      break
+                  fi
+                done)
+                if [ -n "$DeepestPublishFolder" ]; then
+                  uaLog "Using deepest publish folder: [$DeepestPublishFolder]" "success"
+                  ls -R "$DeepestPublishFolder/"
+                  export ArtifactsParentFolderPath="$DeepestPublishFolder"
+                elif DllParentFolder=$(find "$FilePath" -type f -name "*.dll" -printf "%h\n" | sort -u | head -n 1) && [ -n "$DllParentFolder" ]; then
+                  uaLog "No valid publish folder found, using DLL parent folder: [$DllParentFolder]" "success"
+                  ls -R "$DllParentFolder/"
+                  export ArtifactsParentFolderPath="$DllParentFolder"
+                else
+                  uaLog "No DLL files found in [$FilePath] or its subdirectories." "error"
+                  uaLog "Dotnet build failed. Please check your build process." "error"
+                  exit 1
+                fi
+                uaLog "Copying deployable debug dll to folder [/harness/artifactory]" "debug"
+                uaLog "-----------------------------------------------------------------------------------------"
+                uaLog "COMMAND: cp -f -r ${ArtifactsParentFolderPath}/* /harness/artifactory/" "debug"
+                uaLog "-----------------------------------------------------------------------------------------"
+                cp -f -r ${ArtifactsParentFolderPath}/* /harness/artifactory/
+                uaLog "Listing deployable debug dll files in folder [/harness/artifactory]" "debug"
+                ls -R /harness/artifactory/
+                uaLog "Executing command to zip the deployable dll files to upload to veracode for scan" "debug"
+            fi
+            version=$(pwsh --version 2>/dev/null)
+            if [ -n "$version" ]; then
+                uaLog "PowerShell is installed. Version: $version" "info"
+                if [ "$AWSProjectType" != 'Lambda' ]; then
+                    uaLog "Executing Powershell command to zip the deployable dll files to upload to veracode for scan" "debug"
+                    uaLog "-----------------------------------------------------------------------------------------"
+                    uaLog "COMMAND: [pwsh -Command Invoke-Command -ScriptBlock Compress-Archive -Path /harness/artifactory/* -DestinationPath /harness/artifactory/${CodeBaseTag}.zip]" "debug"
+                    uaLog "-----------------------------------------------------------------------------------------"
+                    pwsh -Command Invoke-Command -ScriptBlock "{Compress-Archive -Path '/harness/artifactory/*' -DestinationPath '/harness/artifactory/${CodeBaseTag}.zip'}"
+                    artifact_file="/harness/artifactory/${CodeBaseTag}.zip"
+                    export SourceArtifactUploadPath="/harness/artifactory/${CodeBaseTag}.zip"
+                    export TargetArtifactUploadPath="l-SAST/<+<+stage.variables.AppCi>.toLowerCase()>/<+<+stage.variables.ServiceName>.toLowerCase()>/"
+                    uaLog "-----------------------------------------------------------------------------------------" "warn"
+                    uaLog "SourceArtifactUploadPath: $SourceArtifactUploadPath" "critical"
+                    uaLog "TargetArtifactUploadPath: $TargetArtifactUploadPath" "critical"
+                    uaLog "-----------------------------------------------------------------------------------------" "warn"
+                    if [ -e "$artifact_file" ]; then
+                      uaLog "The Build Artifact File [$artifact_file] exist" "success"
+                      ls -lart /harness/artifactory/
+                    else
+                      uaLog "The Build Artifact File [$artifact_file] doesn't exist" "error"
+                      ls -lart /harness/artifactory/
+                      exit 1
+                    fi
+                else
+                    uaLog "AWS Project Type Detected as [Lambda]." "critical"
+                    uaLog "Executing Powershell command to zip the release deployable dll files to upload for Lambda deployment" "debug"
+                    pwsh -Command Invoke-Command -ScriptBlock "{Compress-Archive -Path '/harness/artifactoryrelease/*' -DestinationPath '/harness/artifactoryrelease/lambda_${CodeBaseTag}.zip'}"
+                    #Checking if lambda file exists
+                    lambdaartifact_file="/harness/artifactoryrelease/lambda_${CodeBaseTag}.zip"
+                    export SourceArtifactUploadPath="/harness/artifactoryrelease/lambda_${CodeBaseTag}.zip"
+                    export TargetArtifactUploadPath="l-generic-artifacts/LambdaCI/<+<+stage.variables.AppCi>.toLowerCase()>/<+<+stage.variables.ServiceName>.toLowerCase()>/"
+                    uaLog "-----------------------------------------------------------------------------------------" "warn"
+                    uaLog "SourceArtifactUploadPath: $SourceArtifactUploadPath" "critical"
+                    uaLog "TargetArtifactUploadPath: $TargetArtifactUploadPath" "critical"
+                    uaLog "-----------------------------------------------------------------------------------------" "warn"
+                    if [ -e "$lambdaartifact_file" ]; then
+                        uaLog "The Build Artifact File [$lambdaartifact_file] exist" "success"
+                        ls -lart /harness/artifactoryrelease/
+                        else
+                        uaLog "The Build Artifact File [$lambdaartifact_file] doesn't exist" "error"
+                        ls -lart /harness/artifactoryrelease/
+                        exit 1
+                    fi
+                fi
+            else
+                if [ "$AWSProjectType" != 'Lambda' ]; then
+                    uaLog "PowerShell is not installed. Using Zip Command to Compress Files" "info"
+                    uaLog "-----------------------------------------------------------------------------------------"
+                    uaLog "COMMAND: zip -r /harness/artifactory/${CodeBaseTag}.zip /harness/artifactory/" "debug"
+                    uaLog "-----------------------------------------------------------------------------------------"
+                    zip -r /harness/artifactory/${CodeBaseTag}.zip /harness/artifactory/
+                    artifact_file="/harness/artifactory/${CodeBaseTag}.zip"
+                    export SourceArtifactUploadPath="/harness/artifactory/${CodeBaseTag}.zip"
+                    export TargetArtifactUploadPath="l-SAST/<+<+stage.variables.AppCi>.toLowerCase()>/<+<+stage.variables.ServiceName>.toLowerCase()>/"
+                    uaLog "-----------------------------------------------------------------------------------------" "warn"
+                    uaLog "SourceArtifactUploadPath: $SourceArtifactUploadPath" "critical"
+                    uaLog "TargetArtifactUploadPath: $TargetArtifactUploadPath" "critical"
+                    uaLog "-----------------------------------------------------------------------------------------" "warn"
+                    if [ -e "$artifact_file" ]; then
+                      uaLog "The Build Artifact File [$artifact_file] exist" "success"
+                      ls -lart /harness/artifactory/
+                    else
+                      uaLog "The Build Artifact File [$artifact_file] doesn't exist" "error"
+                      ls -lart /harness/artifactory/
+                      exit 1
+                    fi
+                else
+                    uaLog "AWS Project Type Detected as [Lambda]." "critical"
+                    uaLog "Executing zip command to compress the debug deployable dll files to upload to veracode for scan" "debug"
+                    uaLog "-----------------------------------------------------------------------------------------"
+                    uaLog "COMMAND: zip -r /harness/artifactory/${CodeBaseTag}.zip /harness/artifactory/" "debug"
+                    uaLog "-----------------------------------------------------------------------------------------"
+                    uaLog "Executing zip command to compress the release deployable dll files for lambda deployment" "debug"
+                    zip -r /harness/artifactoryrelease/lambda_${CodeBaseTag}.zip /harness/artifactoryrelease/
+                    #Checking if lambda file exists
+                    lambdaartifact_file="/harness/artifactoryrelease/lambda_${CodeBaseTag}.zip"
+                    export SourceArtifactUploadPath="/harness/artifactoryrelease/lambda_${CodeBaseTag}.zip"
+                    export TargetArtifactUploadPath="l-generic-artifacts/LambdaCI/<+<+stage.variables.AppCi>.toLowerCase()>/<+<+stage.variables.ServiceName>.toLowerCase()>/"
+                    uaLog "-----------------------------------------------------------------------------------------" "warn"
+                    uaLog "SourceArtifactUploadPath: $SourceArtifactUploadPath" "critical"
+                    uaLog "TargetArtifactUploadPath: $TargetArtifactUploadPath" "critical"
+                    uaLog "-----------------------------------------------------------------------------------------" "warn"
+                    if [ -e "$lambdaartifact_file" ]; then
+                        uaLog "The Build Artifact File [$lambdaartifact_file] exist" "success"
+                        ls -lart /harness/artifactoryrelease/
+                        else
+                        uaLog "The Build Artifact File [$lambdaartifact_file] doesn't exist" "error"
+                        ls -lart /harness/artifactoryrelease/
+                        exit 1
+                    fi
+                fi
+            fi
+        } || { VeracodePackagerStatus=$?; }
+        [ "$VeracodePackagerStatus" -ne 0 ] && VERACODE_PACKAGER_STATUS="FAILED" || VERACODE_PACKAGER_STATUS="SUCCESS"
+        uaLog "Veracode Packager Execution is complete. VERACODE_PACKAGER_STATUS => [$VERACODE_PACKAGER_STATUS]" "critical"
+        if [ $VeracodePackagerStatus -ne 0 ]; then
+            uaLog "Veracode Packager Execution Failed!!!!" "error"
+            exit $VeracodePackagerStatus
+        else
+            uaLog "Veracode Packager Execution SUCCESS!!!!" "success"
+        fi
+        uaLog "-----------------------------------------------------------------------------------------"
+      envVariables:
+        AppCi: <+input>
+        ServiceName: <+input>
+        CodeBaseTag: <+input>
+        DotnetProjectFolder: <+input>
+        DotnetProjectFile: <+input>
+        DotnetSolutionFile: <+input>
+        DotnetTestProjectPath: <+input>
+        DotnetSkipTest: <+input>
+        DotnetSkipPublish: "false"
+        NugetRegistryUrl: https://artifactorycloud.ual.com/artifactory/api/nuget/v3/v-nuget/index.json
+        NugetRegistryUser: <+secrets.getValue('account.Harness_Jfrog_RW_User')>
+        NugetRegistryPassword: <+secrets.getValue('account.Harness_JfrogRW')>
+      outputVariables:
+        - name: SourceArtifactUploadPath
+        - name: TargetArtifactUploadPath
+        - name: AWSProjectType
+      resources:
+        limits:
+          memory: 4Gi
+          cpu: 4000m
+    description: The standard step template to execute Dotnet Build, test, pack and publish
+  icon: data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0idXRmLTgiPz48IS0tIFVwbG9hZGVkIHRvOiBTVkcgUmVwbywgd3d3LnN2Z3JlcG8uY29tLCBHZW5lcmF0b3I6IFNWRyBSZXBvIE1peGVyIFRvb2xzIC0tPgo8c3ZnIHdpZHRoPSI4MDBweCIgaGVpZ2h0PSI4MDBweCIgdmlld0JveD0iMCAwIDY0IDY0IiBpZD0iTGF5ZXJfMSIgZGF0YS1uYW1lPSJMYXllciAxIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPjxkZWZzPjxzdHlsZT4uY2xzLTF7ZmlsbDojNWMyZDkxO30uY2xzLTIsLmNscy0ze2ZpbGw6I2ZmZmZmZjt9LmNscy0ye29wYWNpdHk6MC4xO308L3N0eWxlPjwvZGVmcz48dGl0bGU+bG9nb19ORVQ8L3RpdGxlPjxjaXJjbGUgY2xhc3M9ImNscy0xIiBjeD0iMzIiIGN5PSIzMiIgcj0iMzIiLz48cGF0aCBjbGFzcz0iY2xzLTIiIGQ9Ik05LjgyLDlBMzIsMzIsMCwxLDAsNTUsNTQuMThaIi8+PHBhdGggY2xhc3M9ImNscy0zIiBkPSJNNy40LDQxLjI1YTEuMzUsMS4zNSwwLDAsMS0xLS40MiwxLjM4LDEuMzgsMCwwLDEtLjQxLTEsMS40LDEuNCwwLDAsMSwuNDEtMSwxLjM0LDEuMzQsMCwwLDEsMS0uNDMsMS4zNywxLjM3LDAsMCwxLDEsLjQzLDEuMzksMS4zOSwwLDAsMSwuNDIsMSwxLjM3LDEuMzcsMCwwLDEtLjQyLDFBMS4zOCwxLjM4LDAsMCwxLDcuNCw0MS4yNVoiLz48cGF0aCBjbGFzcz0iY2xzLTMiIGQ9Ik0yNy4yNyw0MUgyNC42NUwxNS4yOCwyNi40NmE2LjA2LDYuMDYsMCwwLDEtLjU4LTEuMTRoLS4wOGExOC43MSwxOC43MSwwLDAsMSwuMSwyLjVWNDFIMTIuNTlWMjIuNzdoMi43N2w5LjEyLDE0LjI4cS41Ny44OS43NCwxLjIyaC4wNWExOS4yOSwxOS4yOSwwLDAsMS0uMTMtMi42OFYyMi43N2gyLjEzWiIvPjxwYXRoIGNsYXNzPSJjbHMtMyIgZD0iTTQxLjY5LDQxSDMyVjIyLjc3aDkuMjRWMjQuN0gzNC4xOHY2LjA2aDYuNTh2MS45MkgzNC4xOFYzOWg3LjUyWiIvPjxwYXRoIGNsYXNzPSJjbHMtMyIgZD0iTTU2LDI0LjdINTAuN1Y0MUg0OC41N1YyNC43SDQzLjMzVjIyLjc3SDU2WiIvPjwvc3ZnPg==
+  versionLabel: v1.0.1
