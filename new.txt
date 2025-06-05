@@ -1,13 +1,12 @@
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "AWS": "arn:aws:iam::your-account-id:role/firehose-role"
-      },
-      "Action": "s3:PutObject",
-      "Resource": "arn:aws:s3:::your-bucket-name/*"
-    }
-  ]
-}
+      serviceDependencies:
+        - identifier: DIND
+          name: DIND
+          type: Service
+          spec:
+            connectorRef: account.JfrogCloudArtifactoryDocker
+            image: artifactorycloud.ual.com/v-docker/docker/docker:dind
+            privileged: true
+            resources:
+              limits:
+                memory: 3Gi
+                cpu: 3000m
